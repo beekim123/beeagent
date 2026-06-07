@@ -6,9 +6,50 @@ import { createInterface } from 'node:readline';
 import { ToolRegistry } from './tools/tool-registry';
 import { allTools } from './tools/tools';
 import { agentLoop } from './agent/loop';
+// 手写 JSON-RPC 版保留在这里，必要时可以切回：
+// import { MCPClient, MockMCPClient } from './mcp/mcp-clinet';
+import { MCPClient, MockMCPClient } from './mcp/mcp-client';
 
 const toolRegistry = new ToolRegistry();
 toolRegistry.register(...allTools);
+
+async function connectMCP() {
+  const githubToken = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+
+  let canSpawn = true;
+  try {
+    const { execSync } = await import('node:child_process');
+    execSync('echo test', { stdio: 'ignore' });
+  } catch {
+    canSpawn = false;
+  }
+
+  if (githubToken && canSpawn) {
+    console.log('\n连接 GitHub MCP Server...');
+    try {
+      const client = new MCPClient(
+        'npx', ['-y', '@modelcontextprotocol/server-github'],
+        { GITHUB_PERSONAL_ACCESS_TOKEN: githubToken },
+      );
+      const tools = await toolRegistry.registerMCPServer('github', client);
+      console.log(`  已注册 ${tools.length} 个 MCP 工具`);
+      return;
+    } catch (err) {
+      await toolRegistry.closeAllMCP();
+      console.log(`  MCP 连接失败: ${err instanceof Error ? err.message : err}`);
+      console.log('  降级为 Mock MCP...');
+    }
+  }
+
+  if (!githubToken) {
+    console.log('\n未配置 GITHUB_PERSONAL_ACCESS_TOKEN，使用 Mock MCP');
+  }
+
+  const mockClient = new MockMCPClient();
+  const tools = await toolRegistry.registerMCPServer('github', mockClient);
+  console.log(`  已注册 ${tools.length} 个 Mock MCP 工具`);
+}
+
 
 const dashscopeApiKey = process.env.DASHSCOPE_API_KEY?.trim();
 const hasDashScopeKey = Boolean(dashscopeApiKey && !/\s/.test(dashscopeApiKey));
@@ -58,6 +99,7 @@ function ask() {
     const trimmed = input.trim();
     if (!trimmed || trimmed === 'exit') {
       console.log('Bye!');
+      await toolRegistry.closeAllMCP();
       rl.close();
       return;
     }
@@ -83,6 +125,8 @@ function ask() {
     if (!isReadlineClosed) ask();
   });
 }
+
+await connectMCP();
 
 console.log('Super Agent v0.1 (type "exit" to quit)\n');
 ask();
