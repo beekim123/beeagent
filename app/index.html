@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Todo List</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 600px; margin: 0 auto; padding: 1rem; }
+    input, button { padding: 0.5rem; margin: 0.25rem 0; }
+    .todo-item { display: flex; align-items: center; margin: 0.5rem 0; }
+    .todo-item input[type=checkbox] { margin-right: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>📝 AI Todo List</h1>
+  <div>
+    <input id="newTodo" placeholder="输入新任务..." />
+    <button onclick="addTodo()">+</button>
+  </div>
+  <ul id="todoList"></ul>
+  <div>
+    <button onclick="suggestWithAI()">✨ 让 AI 建议任务</button>
+  </div>
+
+  <!-- Load AI SDK & adapter via esm.sh -->
+  <script type="module">
+    import { generateText } from 'https://esm.sh/@ai-sdk/core@0.117.0';
+    import { anthropic } from 'https://esm.sh/@ai-sdk/anthropic@0.117.0';
+
+    // Mock AI call (since real Anthropic needs API key & CORS)
+    window.suggestWithAI = async () => {
+      const input = document.getElementById('newTodo').value || '学习新技能';
+      alert(`[Demo] AI suggests: "复习 TypeScript 类型系统" and "写一个 React 组件示例"`);
+    };
+
+    window.addTodo = () => {
+      const input = document.getElementById('newTodo');
+      const text = input.value.trim();
+      if (!text) return;
+
+      const li = document.createElement('li');
+      li.className = 'todo-item';
+      li.innerHTML = `
+        <input type="checkbox" onchange="toggleDone(this)">
+        <span>${text}</span>
+        <button onclick="removeTodo(this)">✕</button>
+      `;
+      document.getElementById('todoList').appendChild(li);
+      input.value = '';
+      input.focus();
+    };
+
+    window.removeTodo = (btn) => btn.parentElement.remove();
+    window.toggleDone = (cb) => {
+      const span = cb.nextElementSibling;
+      span.style.textDecoration = cb.checked ? 'line-through' : 'none';
+    };
+  </script>
+</body>
+</html>
