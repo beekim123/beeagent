@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { type ModelMessage } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
-import { createMockModel } from './mock-model';
+import { createMockModel, setCacheEnabled } from './mock-model';
 import { createInterface } from 'node:readline';
 import { ToolRegistry } from './tools/tool-registry';
 import { allTools } from './tools/tools';
@@ -12,6 +12,8 @@ import {
   type PromptContext,
 } from './context/prompt-builder';
 import { estimateMessageTokens, applyDefense } from './context/defense';
+import { buildContextSnapshot, renderContextView, renderUsageView } from './context/views';
+import { UsageTracker } from './usage/tracker';
 
 const toolRegistry = new ToolRegistry();
 toolRegistry.register(...allTools);
@@ -25,6 +27,13 @@ function printToolStats(): void {
   console.log(`  Token 估算: ~${stats.estimatedTokens.active}`);
 }
 
+function estimateToolDescriptionChars(
+  tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
+): number {
+  return tools.reduce((sum, tool) => {
+    return sum + tool.name.length + tool.description.length + JSON.stringify(tool.parameters).length;
+  }, 0);
+}
 
 const dashscopeApiKey = process.env.DASHSCOPE_API_KEY?.trim();
 const hasDashScopeKey = Boolean(dashscopeApiKey && !/\s/.test(dashscopeApiKey));
@@ -101,7 +110,12 @@ async function main() {
   const isContinue = process.argv.includes('--continue');
   const sessionId = 'default';
   const store = new SessionStore(sessionId);
+  const tracker = new UsageTracker('.usage/today.jsonl');
   const timestamps = new Map<number, number>();
+  const modelName = hasDashScopeKey ? 'Qwen Plus' : 'Mock Model (开发用)';
+  const modelId = hasDashScopeKey ? 'qwen3-6-plus' : 'mock-model';
+  const windowTokens = 1_000_000;
+  setCacheEnabled(true);
 
   // Session 持久化
   let messages: ModelMessage[] = [];
@@ -120,15 +134,29 @@ async function main() {
     .pipe('deferredTools', deferredTools())
     .pipe('sessionContext', sessionContext());
 
-  const buildSystemPrompt = (): string => {
-    const promptCtx: PromptContext = {
-      toolCount: toolRegistry.getActiveTools().length,
-      deferredToolSummary: '',
-      sessionMessageCount: messages.length,
-      sessionId,
-    };
+  const currentPromptContext = (): PromptContext => ({
+    toolCount: toolRegistry.getActiveTools().length,
+    deferredToolSummary: toolRegistry.getDeferredToolSummary(),
+    sessionMessageCount: messages.length,
+    sessionId,
+  });
 
-    return promptBuilder.build(promptCtx);
+  const buildSystemPrompt = (): string => {
+    return promptBuilder.build(currentPromptContext());
+  };
+
+  const buildContextView = (): string => {
+    return renderContextView(buildContextSnapshot({
+      modelName,
+      modelId,
+      windowTokens,
+      systemPromptChars: buildSystemPrompt().length,
+      toolDescriptionChars: estimateToolDescriptionChars(toolRegistry.getActiveTools()),
+      memoryChars: 0,
+      skillsChars: 0,
+      messages,
+      autocompactBufferTokens: Math.round(windowTokens * 0.05),
+    }));
   };
 
   const runDefense = (): void => {
@@ -176,6 +204,28 @@ async function main() {
       return true;
     }
 
+    if (input === '/context' || input === 'context') {
+      console.log(buildContextView());
+      return true;
+    }
+
+    if (input === '/usage' || input === 'usage') {
+      console.log(renderUsageView(tracker));
+      return true;
+    }
+
+    if (input === '/cache off' || input === 'cache off') {
+      setCacheEnabled(false);
+      console.log('\n[Cache] mock prompt cache 已关闭\n');
+      return true;
+    }
+
+    if (input === '/cache on' || input === 'cache on') {
+      setCacheEnabled(true);
+      console.log('\n[Cache] mock prompt cache 已开启\n');
+      return true;
+    }
+
     return false;
   }
 
@@ -206,7 +256,7 @@ async function main() {
       const beforeLen = messages.length;
 
       try {
-        await agentLoop(model, toolRegistry, messages, buildSystemPrompt());
+        await agentLoop(model, toolRegistry, messages, buildSystemPrompt(), tracker, modelId);
         const newMessages = messages.slice(beforeLen);
         const now = Date.now();
         for (let i = beforeLen; i < messages.length; i++) {
@@ -226,17 +276,16 @@ async function main() {
     });
   }
 
-  console.log('Super Agent v0.9 — Context Defense (type "exit" to quit)');
+  console.log('Super Agent v0.9 - Context Defense + Usage Tracking (type "exit" to quit)');
   console.log('快捷命令：');
-  console.log('  模拟长对话 / sim    — 注入带时间跨度的大工具结果');
-  console.log('  执行防线 / defend   — 执行截断和 TTL 修剪');
-  console.log('  查看状态 / status   — 查看当前消息数和 token 估算\n');
-  promptBuilder.debug({
-    toolCount: toolRegistry.getActiveTools().length,
-    deferredToolSummary: '',
-    sessionMessageCount: messages.length,
-    sessionId,
-  });
+  console.log('  /context / context  - 查看上下文视图');
+  console.log('  /usage   / usage    - 查看累计成本和 cache 命中率');
+  console.log('  /cache off/on       - 切换 mock cache');
+  console.log('  模拟长对话 / sim    - 注入带时间跨度的大工具结果');
+  console.log('  执行防线 / defend   - 执行截断和 TTL 修剪');
+  console.log('  查看状态 / status   - 查看当前消息数和 token 估算\n');
+  console.log(buildContextView());
+  promptBuilder.debug(currentPromptContext());
   ask();
 }
 

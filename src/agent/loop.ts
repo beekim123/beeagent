@@ -2,6 +2,7 @@ import { streamText, type ModelMessage } from 'ai';
 import { ToolRegistry } from '../tools/tool-registry';
 import { detect, recordCall, recordResult, resetHistory } from './loop-detection.js';
 import { isRetryable, calculateDelay, sleep } from './retry.js';
+import { normalizeUsage, type UsageTracker } from '../usage/tracker.js';
 
 const MAX_STEPS = 15;
 const MAX_RETRIES = 3;
@@ -18,6 +19,8 @@ export async function agentLoop(
   registry: ToolRegistry,
   messages: ModelMessage[],
   system: string,
+  tracker?: UsageTracker,
+  modelId = 'mock-model',
 ) {
   let step = 0;
   let totalTokens = 0;
@@ -108,9 +111,18 @@ export async function agentLoop(
 
     messages.push(...stepResponse!.messages);
 
-    const inp = stepUsage?.inputTokens?.total ?? stepUsage?.inputTokens ?? 0;
-    const out = stepUsage?.outputTokens?.total ?? stepUsage?.outputTokens ?? 0;
-    totalTokens += inp + out;
+    const norm = normalizeUsage(stepUsage);
+    const stepRecord = tracker?.record(modelId, norm);
+    totalTokens += norm.inputTokens + norm.outputTokens + norm.cacheReadTokens + norm.cacheWriteTokens;
+
+    if (stepRecord && (norm.cacheReadTokens > 0 || norm.cacheWriteTokens > 0)) {
+      const tag = norm.cacheReadTokens > 0 ? '\x1b[38;5;36m✓ cache hit\x1b[0m' : '\x1b[38;5;220m✎ cache write\x1b[0m';
+      const detail = norm.cacheReadTokens > 0
+        ? `read ${norm.cacheReadTokens}`
+        : `write ${norm.cacheWriteTokens}`;
+      console.log(`  [${tag}] ${detail} tokens · 本步 $${stepRecord.cost.toFixed(5)}`);
+    }
+
     if (totalTokens > TOKEN_BUDGET * 0.9) {
       console.log(`  [Token] ${totalTokens}/${TOKEN_BUDGET} (${Math.round(totalTokens / TOKEN_BUDGET * 100)}%)`);
     }
