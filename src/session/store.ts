@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, appendFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ModelMessage } from 'ai';
 
@@ -40,6 +40,16 @@ export class SessionStore {
     for (const msg of messages) {
       this.append(msg);
     }
+  }
+
+  replaceAll(messages: ModelMessage[]): void {
+    const lines = messages.map((message) => JSON.stringify({
+      type: 'message',
+      timestamp: new Date().toISOString(),
+      message,
+    }));
+    const content = lines.length > 0 ? `${lines.join('\n')}\n` : '';
+    writeFileSync(this.filePath, content, 'utf-8');
   }
 
   load(): ModelMessage[] {

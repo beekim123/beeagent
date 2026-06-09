@@ -11,6 +11,7 @@ import {
   PromptBuilder, coreRules, toolGuide, deferredTools, sessionContext,
   type PromptContext,
 } from './context/prompt-builder';
+import { microcompact, summarize, estimateTokens } from './context/compressor';
 // 手写 JSON-RPC 版保留在这里，必要时可以切回：
 // import { MCPClient, MockMCPClient } from './mcp/mcp-clinet';
 import { MCPClient, MockMCPClient } from './mcp/mcp-client';
@@ -308,6 +309,22 @@ function formatError(error: unknown): string {
   return String(error);
 }
 
+const SUMMARY_PREFIX = '[以下是之前对话的压缩摘要]';
+const SUMMARY_SUFFIX = '[摘要结束，以下是最近的对话]';
+const COMPACTION_TRIGGER_TOKENS = 1000;
+
+function extractSummary(messages: ModelMessage[]): string {
+  const first = messages[0];
+  if (!first || first.role !== 'user' || typeof first.content !== 'string') return '';
+  if (!first.content.startsWith(SUMMARY_PREFIX)) return '';
+
+  const content = first.content.slice(SUMMARY_PREFIX.length).trimStart();
+  const endIndex = content.indexOf(SUMMARY_SUFFIX);
+  if (endIndex === -1) return '';
+
+  return content.slice(0, endIndex).trim();
+}
+
 async function main() {
   await connectMCP();
 
@@ -327,6 +344,7 @@ async function main() {
   } else {
     console.log(`\n[Session] 新会话 "${sessionId}"`);
   }
+  let summary = extractSummary(messages);
 
   const promptBuilder = new PromptBuilder()
     .pipe('coreRules', coreRules())
@@ -344,6 +362,34 @@ async function main() {
 
     return promptBuilder.build(promptCtx);
   };
+
+  const compactIfNeeded = async (): Promise<void> => {
+    const currentTokens = estimateTokens(messages);
+    if (currentTokens <= COMPACTION_TRIGGER_TOKENS) return;
+
+    console.log(`\n  [压缩检查] ~${currentTokens} tokens, 触发压缩...`);
+
+    const microcompactResult = microcompact(messages);
+    messages = microcompactResult.messages;
+    if (microcompactResult.cleared > 0) {
+      console.log(`  [Microcompact] 清理了 ${microcompactResult.cleared} 个工具结果`);
+    }
+
+    const summarizeResult = await summarize(model, messages, summary);
+    if (summarizeResult.compressedCount > 0) {
+      messages = summarizeResult.messages;
+      summary = summarizeResult.summary;
+      console.log(
+        `  [Summarization] 压缩了 ${summarizeResult.compressedCount} 条消息, ~${estimateTokens(messages)} tokens`,
+      );
+    }
+
+    if (microcompactResult.cleared > 0 || summarizeResult.compressedCount > 0) {
+      store.replaceAll(messages);
+    }
+  };
+
+  await compactIfNeeded();
 
   // readline 让这个脚本变成一个可交互的命令行聊天程序。
   const rl = createInterface({
@@ -381,6 +427,7 @@ async function main() {
         await agentLoop(model, toolRegistry, messages, buildSystemPrompt());
         const newMessages = messages.slice(beforeLen);
         store.appendAll(newMessages);
+        await compactIfNeeded();
       } catch (error) {
         // 用户消息已经写入 session；这里只回滚本轮可能产生的不完整 assistant/tool 消息。
         messages.length = beforeLen;
