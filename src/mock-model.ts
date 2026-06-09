@@ -1,5 +1,5 @@
 /**
- * Mock Model v0.8 — Compaction
+ * Mock Model v0.9 — Context Defense
  *
  * 在 v0.4 基础上新增：
  * - tool_search 流程：先搜索延迟工具，再调用
@@ -10,7 +10,7 @@ let retryTestCount = 0;
 
 const TEXT_RESPONSES: Record<string, string> = {
   default:
-    '你好！我是 Super Agent v0.8。摘要压缩已就绪，试试 compress 命令。。',
+    '你好！我是 Super Agent v0.9。三层即时防线已就绪，试试 sim 和 defend 命令。。',
   greeting:
     '你好！我是 Super Agent v0.6，支持 Profile 过滤和延迟加载 :)',
 };
