@@ -6,6 +6,11 @@ import { createInterface } from 'node:readline';
 import { ToolRegistry, type ToolDefinition } from './tools/tool-registry';
 import { allTools } from './tools/tools';
 import { agentLoop } from './agent/loop';
+import { SessionStore } from './session/store';
+import {
+  PromptBuilder, coreRules, toolGuide, deferredTools, sessionContext,
+  type PromptContext,
+} from './context/prompt-builder';
 // 手写 JSON-RPC 版保留在这里，必要时可以切回：
 // import { MCPClient, MockMCPClient } from './mcp/mcp-clinet';
 import { MCPClient, MockMCPClient } from './mcp/mcp-client';
@@ -80,8 +85,8 @@ async function connectMCP() {
 
       // registerMCPServer 会把 GitHub server 暴露的工具统一注册成：
       // mcp__github__工具名
-      // 并且默认标记 shouldDefer，避免 GitHub 的几十个工具一次性进入 prompt。
-      const tools = await toolRegistry.registerMCPServer('github', client);
+      // 当前为了测试延迟加载，显式标记 shouldDefer，避免 GitHub 的几十个工具一次性进入 prompt。
+      const tools = await toolRegistry.registerMCPServer('github', client, { shouldDefer: true });
       console.log(`  已注册 ${tools.length} 个 MCP 工具`);
       return;
     } catch (err) {
@@ -96,9 +101,9 @@ async function connectMCP() {
   }
 
   // 没有 token 或真实 MCP 连接失败时，用 MockMCPClient 保证演示流程还能跑。
-  // Mock 工具同样走 registerMCPServer，所以可以复用同一套延迟加载逻辑。
+  // Mock 工具同样走 registerMCPServer，所以可以复用同一套延迟加载测试逻辑。
   const mockClient = new MockMCPClient();
-  const tools = await toolRegistry.registerMCPServer('github', mockClient);
+  const tools = await toolRegistry.registerMCPServer('github', mockClient, { shouldDefer: true });
   console.log(`  已注册 ${tools.length} 个 Mock MCP 工具`);
 }
 
@@ -298,74 +303,104 @@ const model = hasDashScopeKey
   ? qwen.chat('qwen-plus-latest')
   : createMockModel();
 
-// readline 让这个脚本变成一个可交互的命令行聊天程序。
-const rl = createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
-
-let isReadlineClosed = false;
-rl.on('close', () => {
-  isReadlineClosed = true;
-});
-
-// 保存完整对话历史；每次 agentLoop 结束后会追加 assistant/tool 消息。
-const messages: ModelMessage[] = [];
-
-const sys_prompt = `你是 Super Agent，一个专注于软件开发的 AI 助手。
-你说话简洁直接，喜欢用代码示例来解释问题。
-如果用户的问题不够清晰，你会反问而不是瞎猜。`
-
-function buildSystemPrompt(): string {
-  // 延迟工具摘要放在 system prompt，而不是 AI SDK tools 里。
-  // 这样模型知道“有哪些工具可以搜索”，但不会为每个延迟工具支付完整 schema token。
-  return `${sys_prompt}${toolRegistry.getDeferredToolSummary()}`;
-}
-
 function formatError(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
 }
 
-function ask() {
-  if (isReadlineClosed) return;
+async function main() {
+  await connectMCP();
 
-  rl.question('\nYou: ', async (input) => {
-    const trimmed = input.trim();
-    if (!trimmed || trimmed === 'exit') {
-      console.log('Bye!');
-      await toolRegistry.closeAllMCP();
-      rl.close();
-      return;
-    }
+  // 模拟工具要在 MCP 连接后注册，这样统计里能同时看到真实 GitHub MCP 工具和模拟工具。
+  const simulatedToolCount = registerSimulatedTools();
+  printToolStats(simulatedToolCount);
 
-    const historyLength = messages.length;
+  const isContinue = process.argv.includes('--continue');
+  const sessionId = 'default';
+  const store = new SessionStore(sessionId);
 
-    // AI SDK 的 ModelMessage 可以直接用字符串；这里用 text part，方便 mock 模型统一解析。
-    messages.push({
-      role: 'user',
-      content: [{ type: 'text', text: trimmed }],
-    });
+  // Session 持久化
+  let messages: ModelMessage[] = [];
+  if (isContinue && store.exists()) {
+    messages = store.load();
+    console.log(`\n[Session] 恢复会话 "${sessionId}"，${messages.length} 条历史消息`);
+  } else {
+    console.log(`\n[Session] 新会话 "${sessionId}"`);
+  }
 
-    try {
-      await agentLoop(model, toolRegistry, messages, buildSystemPrompt());
-    } catch (error) {
-      // 本轮失败时回滚用户消息，避免下一轮继续带着一条失败请求重试。
-      messages.length = historyLength;
-      console.error(`\n[错误] ${formatError(error)}`);
-      console.error('[提示] 如果是在测试本地死循环熔断，可以使用 pnpm run start:mock。');
-    }
-   
-    // 当前轮结束后再次等待用户输入，形成持续对话。
-    if (!isReadlineClosed) ask();
+  const promptBuilder = new PromptBuilder()
+    .pipe('coreRules', coreRules())
+    .pipe('toolGuide', toolGuide())
+    .pipe('deferredTools', deferredTools())
+    .pipe('sessionContext', sessionContext());
+
+  const buildSystemPrompt = (): string => {
+    const promptCtx: PromptContext = {
+      toolCount: toolRegistry.getActiveTools().length,
+      deferredToolSummary: toolRegistry.getDeferredToolSummary(),
+      sessionMessageCount: messages.length,
+      sessionId,
+    };
+
+    return promptBuilder.build(promptCtx);
+  };
+
+  // readline 让这个脚本变成一个可交互的命令行聊天程序。
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
   });
+
+  let isReadlineClosed = false;
+  rl.on('close', () => {
+    isReadlineClosed = true;
+  });
+
+  function ask() {
+    if (isReadlineClosed) return;
+
+    rl.question('\nYou: ', async (input) => {
+      const trimmed = input.trim();
+      if (!trimmed || trimmed === 'exit') {
+        console.log('Bye!');
+        await toolRegistry.closeAllMCP();
+        rl.close();
+        return;
+      }
+
+      const userMsg: ModelMessage = {
+        role: 'user',
+        content: trimmed,
+      };
+      messages.push(userMsg);
+      store.append(userMsg);
+
+      const beforeLen = messages.length;
+
+      try {
+        await agentLoop(model, toolRegistry, messages, buildSystemPrompt());
+        const newMessages = messages.slice(beforeLen);
+        store.appendAll(newMessages);
+      } catch (error) {
+        // 用户消息已经写入 session；这里只回滚本轮可能产生的不完整 assistant/tool 消息。
+        messages.length = beforeLen;
+        console.error(`\n[错误] ${formatError(error)}`);
+        console.error('[提示] 如果是在测试本地死循环熔断，可以使用 pnpm run start:mock。');
+      }
+
+      // 当前轮结束后再次等待用户输入，形成持续对话。
+      if (!isReadlineClosed) ask();
+    });
+  }
+
+  console.log('Super Agent v0.1 (type "exit" to quit)\n');
+  promptBuilder.debug({
+    toolCount: toolRegistry.getActiveTools().length,
+    deferredToolSummary: toolRegistry.getDeferredToolSummary(),
+    sessionMessageCount: messages.length,
+    sessionId,
+  });
+  ask();
 }
 
-await connectMCP();
-
-// 模拟工具要在 MCP 连接后注册，这样统计里能同时看到真实 GitHub MCP 工具和模拟工具。
-const simulatedToolCount = registerSimulatedTools();
-printToolStats(simulatedToolCount);
-
-console.log('Super Agent v0.1 (type "exit" to quit)\n');
-ask();
+main().catch(console.error);

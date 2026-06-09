@@ -7,6 +7,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "start:mock": "DASHSCOPE_API_KEY= tsx src/index.ts",
+    "continue": "tsx src/index.ts --continue",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],

@@ -19,6 +19,10 @@ export interface ToolDefinition {
   execute: (input: any) => Promise<unknown>;
 }
 
+export interface RegisterMCPServerOptions {
+  shouldDefer?: boolean;
+}
+
 const DEFAULT_MAX_RESULT_CHARS = 3000;
 
 export class ToolRegistry {
@@ -44,6 +48,7 @@ export class ToolRegistry {
   async registerMCPServer(
     serverName: string,
     client: MCPClient | MockMCPClient,
+    options: RegisterMCPServerOptions = {},
   ): Promise<string[]> {
     // MCP client 先建立连接，再询问 server 支持哪些工具。
     // 这里不关心 client 内部是官方 SDK 还是手写 JSON-RPC，只依赖统一接口。
@@ -67,9 +72,8 @@ export class ToolRegistry {
         name: prefixedName,
         description: `[MCP:${serverName}] ${tool.description}`,
         parameters: tool.inputSchema as Record<string, unknown>,
-        // MCP 工具默认延迟加载。否则像 GitHub 这种 server 一次暴露几十个工具，
-        // 每轮都把所有 schema 发给模型，会明显增加 token 消耗。
-        shouldDefer: true,
+        // 是否延迟加载由调用方决定；测试 GitHub 这种一次暴露几十个工具的 server 时可以打开。
+        shouldDefer: options.shouldDefer ?? false,
         searchHint: `${serverName} ${tool.name} ${tool.description}`,
         isConcurrencySafe: true,
         isReadOnly: true,
